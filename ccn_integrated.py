@@ -5,10 +5,12 @@ Saturn + CCN + KD — Integrated Cognitive Loop
 Perception (Saturn) -> Cognition (CCN) -> Memory (KD) -> Loop
 
 The three systems map to CCN stages:
-  MIRROR  <- Saturn twin whisper (how Hugo is thinking right now)
-  INHERIT <- KD spreading activation (what has been learned before)
-  GATE 6  <- Saturn + KD inform mode: build/explore/maintain
-  Output  -> KD metabolize (deposit knowledge back into the graph)
+  MIRROR  <- Saturn twin_state + twin_patterns (96 temporal keystroke features)
+  INHERIT <- KD graph_query + vault_browse (spreading activation + domain knowledge)
+  VERIFY  <- KD contradiction_scan (amplifies adversarial check vs existing beliefs)
+  GATE 6  <- Saturn temporal signals + KD knowledge density -> mode selection
+  Output  -> KD metabolize + graph_build (deposit + rewire)
+  Zakat   -> KD run_decay (prune unused knowledge during maintain cycles)
 
 Saturn already runs V9 gates internally for perception.
 KD already runs FSRS-based memory metabolism.
@@ -354,13 +356,23 @@ class SaturnBridge:
 
 class KDBridge:
     """
-    KD's spreading activation provides accumulated knowledge:
-    - graph_query returns direct matches AND activated neighbors
-    - Confidence scores weight how strongly to inherit each node
-    - After the cycle, metabolize deposits new knowledge back
+    KD (Knowledge Discovery) is a living knowledge graph with metabolism.
+    1,216+ nodes across 60+ domains. Beliefs strengthen when reinforced,
+    weaken when contradicted, decay when unused (FSRS).
 
-    This is how the system LEARNS. Every cycle strengthens or
-    weakens beliefs in the living knowledge graph.
+    KD MCP tools (matching the actual server):
+    - metabolize: deposit facts/beliefs/reasoning from agent output
+    - graph_query: spreading activation search (direct + neighbor nodes)
+    - graph_build: rebuild edges based on similarity, domain, tag overlap
+    - vault_query: keyword search across the knowledge vault
+    - vault_browse: browse by domain with sorting (confidence, recency, etc)
+    - run_decay: FSRS-based memory decay (unused knowledge fades)
+    - contradiction_scan: detect contradictions between beliefs
+
+    Integration points:
+    - graph_query + vault_browse -> INHERIT (accumulated knowledge)
+    - contradiction_scan -> VERIFY (adversarial check against existing beliefs)
+    - metabolize + graph_build -> post-cycle (deposit + rewire)
     """
 
     def __init__(self, mcp, hidden_dim):
@@ -370,74 +382,159 @@ class KDBridge:
         self._proj = torch.tensor(
             rng.randn(128, hidden_dim).astype(np.float32) / math.sqrt(128)
         )
+        # Separate projection for contradiction signal -> VERIFY
+        rng2 = np.random.RandomState(889)
+        self._contradiction_proj = torch.tensor(
+            rng2.randn(32, hidden_dim).astype(np.float32) / math.sqrt(32)
+        )
 
-    def query(self, text):
-        """Spreading activation search — finds connections you didn't ask for."""
+    # ── Query tools (feed INHERIT) ──
+
+    def graph_query(self, text):
+        """
+        Spreading activation search.
+        Returns direct matches AND their activated neighbors —
+        finds connections you didn't search for.
+        """
         if not self.mcp:
             return None
         return self.mcp.call("graph_query", {"query": text, "depth": 2})
 
-    def browse(self, domain, limit=20, sort="confidence"):
-        """Browse a knowledge domain."""
+    def vault_browse(self, domain, limit=20, sort="confidence"):
+        """Browse a knowledge domain, sorted by confidence or recency."""
         if not self.mcp:
             return None
         return self.mcp.call("vault_browse", {
             "domain": domain, "limit": limit, "sort": sort,
         })
 
-    def inherit_signal(self, query_result):
-        """
-        Encode KD nodes as hidden-dim vector for INHERIT.
+    def vault_query(self, query, domain=None, limit=20):
+        """Keyword search across the knowledge vault."""
+        if not self.mcp:
+            return None
+        params = {"query": query, "limit": limit}
+        if domain:
+            params["domain"] = domain
+        return self.mcp.call("vault_query", params)
 
-        Each node contributes proportional to its confidence.
-        Spreading activation means direct + neighbor nodes —
-        the model inherits implicit connections, not just matches.
+    # ── Contradiction detection (feeds VERIFY) ──
+
+    def contradiction_scan(self, content):
+        """
+        Detect contradictions between new content and existing beliefs.
+        Returns conflicting nodes so VERIFY can adversarially check them.
+        """
+        if not self.mcp:
+            return None
+        return self.mcp.call("contradiction_scan", {"content": content})
+
+    def verify_signal(self, contradiction_result):
+        """
+        Encode contradictions as a hidden-dim vector for VERIFY stage.
+        Contradictions strengthen the adversarial check — if existing
+        beliefs conflict with what EXPRESS generated, VERIFY hits harder.
+        """
+        features = torch.zeros(32)
+        text = _extract_text(contradiction_result)
+        if text:
+            contradictions = _parse_nodes(text)
+            features[0] = min(len(contradictions) / 5.0, 1.0)  # contradiction count
+            for i, c in enumerate(contradictions[:10]):
+                conf = float(c.get("confidence", 0.5))
+                features[1 + (i % 10)] = conf  # confidence of conflicting belief
+                severity = float(c.get("severity", c.get("strength", 0.5)))
+                features[11 + (i % 10)] = severity  # how bad the contradiction is
+            # Overall contradiction intensity
+            if contradictions:
+                features[21] = sum(
+                    float(c.get("confidence", 0.5)) for c in contradictions
+                ) / len(contradictions)
+                features[22] = max(
+                    float(c.get("severity", c.get("strength", 0.5)))
+                    for c in contradictions
+                )
+        return features @ self._contradiction_proj  # (hidden_dim,)
+
+    # ── Encode for INHERIT ──
+
+    def inherit_signal(self, graph_result, browse_result=None):
+        """
+        Encode KD knowledge as hidden-dim vector for INHERIT.
+
+        Combines two sources:
+        - graph_query: spreading activation (direct + neighbor nodes)
+        - vault_browse: domain knowledge sorted by confidence
+
+        Each node contributes proportional to its confidence score.
+        The model inherits implicit connections, not just matches.
         """
         features = torch.zeros(128)
-        text = _extract_text(query_result)
-        if text:
-            nodes = _parse_nodes(text)
-            for i, node in enumerate(nodes[:32]):
-                conf = float(node.get("confidence", 0.5))
-                content = str(node.get("content", node.get("text", "")))
-                for j, c in enumerate(content[:16]):
-                    features[(i * 4 + j) % 126] += ord(c) / 128.0 * conf
-            # Knowledge density in this area
-            features[126] = min(len(nodes) / 20.0, 1.0)
-            # Mean confidence
-            if nodes:
-                features[127] = sum(
-                    float(n.get("confidence", 0.5)) for n in nodes[:20]
-                ) / min(len(nodes), 20)
+
+        # Encode graph_query results (spreading activation)
+        graph_nodes = self._extract_nodes(graph_result)
+        for i, node in enumerate(graph_nodes[:20]):
+            conf = float(node.get("confidence", 0.5))
+            content = str(node.get("content", node.get("text", "")))
+            domain = str(node.get("domain", ""))
+            # Content hash weighted by confidence
+            for j, c in enumerate(content[:16]):
+                features[(i * 4 + j) % 80] += ord(c) / 128.0 * conf
+            # Domain signal
+            for j, c in enumerate(domain[:4]):
+                features[80 + (i * 2 + j) % 16] += ord(c) / 128.0 * conf
+            # Connection count (spreading activation reach)
+            connections = node.get("connections", node.get("edges", []))
+            if isinstance(connections, (list, int)):
+                n_conn = len(connections) if isinstance(connections, list) else connections
+                features[96 + (i % 16)] += min(n_conn / 10.0, 1.0) * conf
+
+        # Encode vault_browse results (domain knowledge)
+        browse_nodes = self._extract_nodes(browse_result)
+        for i, node in enumerate(browse_nodes[:12]):
+            conf = float(node.get("confidence", 0.5))
+            content = str(node.get("content", node.get("text", "")))
+            for j, c in enumerate(content[:8]):
+                features[112 + (i * 2 + j) % 14] += ord(c) / 128.0 * conf
+
+        # Knowledge density: how much we know about this topic
+        all_nodes = graph_nodes + browse_nodes
+        features[126] = min(len(all_nodes) / 30.0, 1.0)
+        # Mean confidence across all retrieved knowledge
+        if all_nodes:
+            features[127] = sum(
+                float(n.get("confidence", 0.5)) for n in all_nodes[:30]
+            ) / min(len(all_nodes), 30)
+
         return features @ self._proj  # (hidden_dim,)
 
-    def knowledge_density(self, query_result):
+    def knowledge_density(self, graph_result, browse_result=None):
         """How much does KD know about this topic? Informs GATE 6."""
-        text = _extract_text(query_result)
-        if not text:
+        graph_nodes = self._extract_nodes(graph_result)
+        browse_nodes = self._extract_nodes(browse_result)
+        all_nodes = graph_nodes + browse_nodes
+        if not all_nodes:
             return 0.0
-        nodes = _parse_nodes(text)
-        if not nodes:
-            return 0.0
-        density = min(len(nodes) / 20.0, 1.0)
-        avg_conf = sum(float(n.get("confidence", 0.5)) for n in nodes) / len(nodes)
+        density = min(len(all_nodes) / 30.0, 1.0)
+        avg_conf = sum(float(n.get("confidence", 0.5)) for n in all_nodes) / len(all_nodes)
         return density * avg_conf
+
+    # ── Deposit tools (post-cycle) ──
 
     def metabolize(self, content, gate_mode, trace):
         """
         Deposit cycle output back into KD's knowledge graph.
 
-        The metabolized knowledge includes:
-        - The actual content/reasoning
-        - Which gate mode was active (build/explore/maintain)
-        - The full topology trace (energy at each stage)
+        Extracts facts, beliefs, and reasoning chains from the content.
+        Tags with gate mode and topology trace so the graph knows
+        HOW this knowledge was produced.
 
-        This is how the graph GROWS. Reinforced beliefs strengthen.
-        Contradicted beliefs weaken. Unused knowledge decays via FSRS.
+        After metabolize, calls graph_build to rewire edges based
+        on the new knowledge — the graph reorganizes itself.
         """
         if not self.mcp:
             return None
-        return self.mcp.call("metabolize", {
+        # Deposit knowledge
+        result = self.mcp.call("metabolize", {
             "content": content,
             "source": "ccn_integrated",
             "domain": "neural-architecture",
@@ -448,6 +545,36 @@ class KDBridge:
                           for name, stype, energy in trace],
             }),
         })
+        # Rebuild edges so the graph incorporates the new node
+        self.graph_build()
+        return result
+
+    def graph_build(self):
+        """
+        Rebuild edges based on similarity, domain, and tag overlap.
+        Called after metabolize so the graph rewires around new knowledge.
+        """
+        if not self.mcp:
+            return None
+        return self.mcp.call("graph_build", {})
+
+    def run_decay(self):
+        """
+        FSRS-based memory decay. Unused knowledge fades.
+        Call periodically (e.g. during zakat/maintain cycles).
+        """
+        if not self.mcp:
+            return None
+        return self.mcp.call("run_decay", {})
+
+    # ── Internal ──
+
+    def _extract_nodes(self, mcp_result):
+        """Parse nodes from any KD tool result."""
+        text = _extract_text(mcp_result)
+        if not text:
+            return []
+        return _parse_nodes(text)
 
 
 # ============================================================
@@ -522,6 +649,9 @@ class CognitiveLoop:
         self._inherit_gate = torch.tensor(
             (rng.randn(hidden_dim, hidden_dim) * 0.1 / math.sqrt(hidden_dim)).astype(np.float32)
         )
+        self._verify_gate = torch.tensor(
+            (rng.randn(hidden_dim, hidden_dim) * 0.1 / math.sqrt(hidden_dim)).astype(np.float32)
+        )
 
         self._online = {
             "saturn": saturn_mcp.connected if saturn_mcp else False,
@@ -548,13 +678,28 @@ class CognitiveLoop:
 
     def cycle(self, input_text, state=None, n_cycles=1):
         """
-        One full cognitive loop.
+        One full cognitive loop. Every stage has a purpose.
+        Every external system feeds a specific stage. No wasted calls.
 
-        1. Saturn -> MIRROR context (perception of Hugo's state)
-        2. KD -> INHERIT context (accumulated knowledge via spreading activation)
-        3. CCN -> 7-stage cycle with injected signals
-        4. Output -> KD metabolize (deposit knowledge back)
-        5. Return state + trace + mode
+        PRE-CYCLE:
+          Saturn twin_state + twin_patterns -> MIRROR signal + GATE 6 bias
+          KD graph_query (spreading activation) -> INHERIT signal
+          KD vault_browse (domain knowledge)   -> INHERIT signal (combined)
+          KD contradiction_scan                -> VERIFY signal
+
+        CYCLE (7 stages, closed):
+          1. MIRROR  <- Saturn perception (how Hugo is thinking right now)
+          2. INHERIT <- KD graph + vault (what has been learned before)
+          3. BOUND   <- pure topology (low-rank compression)
+          4. EXPRESS  <- pure topology (phi-rotated, ONLY generative stage)
+          5. VERIFY  <- KD contradictions (adversarial check vs existing beliefs)
+          6. REMOVE  <- pure topology (aggressive pruning)
+          7. GATE 6  <- Saturn + KD density (build/explore/maintain)
+
+        POST-CYCLE:
+          KD metabolize (deposit output as facts/beliefs/reasoning)
+          KD graph_build (rewire edges around new knowledge)
+          KD run_decay (if zakat mode — prune unused knowledge)
 
         The cycle CLOSES: GATE 6 output IS the next MIRROR input.
         """
@@ -570,10 +715,19 @@ class CognitiveLoop:
         mirror_ctx = self.saturn.mirror_signal(saturn_state, saturn_patterns)
         gate_bias = self.saturn.gate6_bias(saturn_state, saturn_patterns)
 
-        # ── MEMORY: KD spreading activation ──
-        kd_result = self.kd.query(input_text)
-        inherit_ctx = self.kd.inherit_signal(kd_result)
-        kd_density = self.kd.knowledge_density(kd_result)
+        # ── MEMORY: KD spreading activation + domain knowledge ──
+        # graph_query: finds direct matches AND activated neighbors
+        kd_graph = self.kd.graph_query(input_text)
+        # vault_browse: pull domain knowledge sorted by confidence
+        kd_browse = self.kd.vault_browse("neural-architecture", limit=20, sort="confidence")
+        # Combined signal for INHERIT
+        inherit_ctx = self.kd.inherit_signal(kd_graph, kd_browse)
+        kd_density = self.kd.knowledge_density(kd_graph, kd_browse)
+
+        # ── CONTRADICTION CHECK: KD contradiction_scan -> VERIFY ──
+        # Scan input against existing beliefs BEFORE the cycle runs
+        kd_contradictions = self.kd.contradiction_scan(input_text)
+        verify_ctx = self.kd.verify_signal(kd_contradictions)
 
         # Adjust gate bias with KD density
         # Sparse knowledge -> more explore. Dense knowledge -> more build.
@@ -589,32 +743,46 @@ class CognitiveLoop:
         trace = []
         for _ in range(n_cycles):
             # 1. MIRROR + Saturn injection (perception feeds metacognition)
+            #    Saturn's millisecond keystroke data tells MIRROR how Hugo
+            #    is thinking — the symmetric matrix reflects BOTH the prompt
+            #    AND the cognitive context
             saturn_inj = (mirror_ctx.unsqueeze(0) @ self._mirror_gate) * 0.3
             state = torch.tanh(state @ self.topo["mirror"] + u + saturn_inj)
             trace.append(("MIRROR", "constrictive", state.norm().item()))
 
             # 2. INHERIT + KD injection (memory feeds knowledge absorption)
+            #    graph_query spreading activation + vault_browse domain knowledge
+            #    weighted by confidence — the model works from accumulated
+            #    knowledge, not from scratch
             kd_inj = (inherit_ctx.unsqueeze(0) @ self._inherit_gate) * 0.3
             state = torch.tanh(state @ self.topo["inherit"] + u + kd_inj)
             trace.append(("INHERIT", "expansive", state.norm().item()))
 
-            # 3. BOUND — low-rank compression
+            # 3. BOUND — low-rank compression (pure topology, no injection)
             state = torch.tanh(state @ self.topo["bound"] + u)
             trace.append(("BOUND", "constrictive", state.norm().item()))
 
             # 4. EXPRESS — phi-rotated generation (ONLY generative stage)
+            #    Pure topology. This is where dimensionality expands.
             state = torch.tanh(state @ self.topo["express"] + u)
             trace.append(("EXPRESS", "expansive", state.norm().item()))
 
-            # 5. VERIFY — adversarial self-test
-            state = torch.tanh(state @ self.topo["verify"] + u)
+            # 5. VERIFY + KD contradiction injection (adversarial self-test)
+            #    The anti-symmetric matrix produces opposition. KD's
+            #    contradiction_scan amplifies this — if existing beliefs
+            #    conflict with what EXPRESS generated, VERIFY hits HARDER.
+            contra_inj = (verify_ctx.unsqueeze(0) @ self._verify_gate) * 0.3
+            state = torch.tanh(state @ self.topo["verify"] + u + contra_inj)
             trace.append(("VERIFY", "constrictive", state.norm().item()))
 
             # 6. REMOVE — aggressive pruning (double-compression with VERIFY)
+            #    Pure topology. Only the strongest signals survive.
             state = torch.tanh(state @ self.topo["remove"] + u)
             trace.append(("REMOVE", "constrictive", state.norm().item()))
 
             # 7. GATE 6 — adaptive closer, informed by Saturn + KD
+            #    Mode selection from temporal keystroke data + knowledge density.
+            #    Feeds back to MIRROR. The cycle closes.
             state = self._gate6(state, gate_bias)
             trace.append(("GATE_6", "expansive", state.norm().item()))
 
@@ -622,10 +790,16 @@ class CognitiveLoop:
         t, d, z = gate_bias
         mode = "tamam" if t >= d and t >= z else ("darash" if d >= z else "zakat")
 
-        # ── MEMORY: Metabolize output back into KD ──
+        # ── POST-CYCLE: Metabolize output back into KD ──
+        # Deposit facts/beliefs/reasoning into the knowledge graph
         self.kd.metabolize(input_text, mode, trace)
+        # metabolize() calls graph_build() internally to rewire edges
 
-        return CycleResult(state, trace, mode, saturn_state, kd_result)
+        # If zakat (maintain) mode: also run decay to prune unused knowledge
+        if mode == "zakat":
+            self.kd.run_decay()
+
+        return CycleResult(state, trace, mode, saturn_state, kd_graph)
 
     def _gate6(self, state, bias):
         """
@@ -833,36 +1007,48 @@ def demo():
     print(f"  INTEGRATION ARCHITECTURE")
     print(f"{'='*66}")
     print(f"""
-  Saturn MCP ─────────────────────┐
-  (twin_state, twin_patterns)     │
-                                  ▼
-  ┌─ MIRROR ◄── Saturn whisper (perception of cognitive state)
-  │    ▲ symmetric reflection
+  Saturn MCP (5 tools)                    KD MCP (7 tools)
+  ├─ twin_state (temporal metrics)        ├─ graph_query (spreading activation)
+  ├─ twin_patterns (keystroke behavior)   ├─ vault_browse (domain knowledge)
+  ├─ twin_gates (gate audit trail)        ├─ vault_query (keyword search)
+  ├─ twin_feed (force processing)         ├─ contradiction_scan (belief conflicts)
+  └─ twin_history (evolving snapshots)    ├─ metabolize (deposit knowledge)
+                                          ├─ graph_build (rewire edges)
+                                          └─ run_decay (FSRS memory decay)
+
+  PRE-CYCLE:
+    Saturn twin_state + twin_patterns ──► MIRROR signal (96 temporal features)
+    KD graph_query + vault_browse ──────► INHERIT signal (spreading activation)
+    KD contradiction_scan ──────────────► VERIFY signal (belief conflicts)
+    Saturn + KD density ────────────────► GATE 6 bias (mode selection)
+
+  CYCLE:
+  ┌─ MIRROR ◄── Saturn: keystroke velocity, hesitation, deletion bursts
+  │    ▲ symmetric matrix (reflection/diagnosis)
   │    │
-  ├─ INHERIT ◄── KD spreading activation (accumulated knowledge)
-  │    ◆ near-orthogonal absorption
+  ├─ INHERIT ◄── KD: graph_query neighbors + vault_browse domain knowledge
+  │    ◆ near-orthogonal matrix (preserve + absorb)
   │    │
   ├─ BOUND
-  │    ▲ low-rank compression
+  │    ▲ low-rank projection (rank = dim//4)
   │    │
   ├─ EXPRESS
-  │    ◆ phi-rotated generation (ONLY generative stage)
+  │    ◆ phi-rotated orthogonal matrix (ONLY generative stage)
   │    │
-  ├─ VERIFY
-  │    ▲ adversarial self-test
+  ├─ VERIFY ◄── KD: contradiction_scan (amplifies adversarial check)
+  │    ▲ anti-symmetric matrix (produces opposition)
   │    │
   ├─ REMOVE
-  │    ▲ aggressive pruning (double-compression bottleneck)
+  │    ▲ low-rank projection (rank = dim//7, double-compression bottleneck)
   │    │
-  └─ GATE 6 ◄── Saturn + KD inform mode selection
-       ◆ tamam/darash/zakat
+  └─ GATE 6 ◄── Saturn temporal signals + KD knowledge density
+       ◆ tamam (build) / darash (explore) / zakat (maintain)
        │
-       ├──► KD metabolize (deposit knowledge back)
+       ├──► KD metabolize (deposit facts/beliefs/reasoning)
+       ├──► KD graph_build (rewire edges around new knowledge)
+       ├──► KD run_decay (if zakat mode — prune unused knowledge)
        │
        └──► feeds back to MIRROR (cycle closes)
-                                  ▲
-  KD MCP ─────────────────────────┘
-  (graph_query, metabolize)
 
   Pattern: C -> E -> C -> E -> C -> C -> E
   The chestohedron's 7 faces: 4 triangular + 3 kite.
