@@ -116,25 +116,44 @@ class MCPClient:
 
 class SaturnBridge:
     """
-    Saturn watches Hugo's live thought stream and provides:
-    - twin_state: narrative understanding of Hugo right now
-    - twin_patterns: accumulated behavioral observations
+    Saturn watches Hugo's live thought stream via LevelDB keystroke capture.
+    It sees the TEMPORAL SHAPE of thought — not finished prompts.
 
-    These become the MIRROR stage's metacognitive input and
-    inform GATE 6's mode selection.
+    What Saturn actually captures (via saturn_watcher.py):
+    - Keystroke timestamps to the millisecond
+    - Inter-key intervals (typing velocity)
+    - Deletion events (backspace/delete bursts)
+    - Hesitation gaps (pauses > threshold)
+    - Rethinking events (type → delete → retype differently)
+    - Character-level edit distance between drafts
+
+    twin_state returns: narrative + temporal metrics + predictions + tensions
+    twin_patterns returns: accumulated keystroke behavior patterns
+    twin_gates returns: MIRROR/VERIFY/REMOVE gate audit trail
+
+    These feed MIRROR (metacognition) and GATE 6 (mode selection).
     """
+
+    # Feature map: 96 continuous features from Saturn's temporal perception
+    # [0-15]  keystroke dynamics (velocity, variance, acceleration)
+    # [16-31] deletion patterns (rate, burst length, burst frequency)
+    # [32-47] hesitation patterns (gap duration, gap frequency, gap position)
+    # [48-63] rethinking patterns (edit distance, rewrite rate, draft count)
+    # [64-79] session dynamics (time on task, fatigue curve, momentum)
+    # [80-95] twin predictions (confidence, energy, frustration, decisiveness)
+    N_FEATURES = 96
 
     def __init__(self, mcp, hidden_dim):
         self.mcp = mcp
         self.dim = hidden_dim
-        # Fixed projection: 64 perceptual features -> hidden_dim
         rng = np.random.RandomState(777)
         self._proj = torch.tensor(
-            rng.randn(64, hidden_dim).astype(np.float32) / math.sqrt(64)
+            rng.randn(self.N_FEATURES, hidden_dim).astype(np.float32)
+            / math.sqrt(self.N_FEATURES)
         )
 
     def query(self):
-        """Get twin_state + twin_patterns from Saturn."""
+        """Get twin_state + twin_patterns + twin_gates from Saturn."""
         if not self.mcp:
             return None, None
         state = self.mcp.call("twin_state")
@@ -143,56 +162,188 @@ class SaturnBridge:
 
     def mirror_signal(self, state=None, patterns=None):
         """
-        Encode Saturn's perception as a hidden-dim vector for MIRROR.
+        Encode Saturn's temporal perception as a hidden-dim vector for MIRROR.
 
-        Extracts cognitive signals: energy, frustration, decisiveness,
-        exploration mode, focus level — the temporal shape of thought.
+        Parses the actual keystroke dynamics Saturn captures:
+        - Typing velocity (chars/sec, inter-key interval distribution)
+        - Deletion bursts (consecutive deletes, delete-to-type ratio)
+        - Hesitation gaps (pause duration, where in the sentence)
+        - Rethinking events (typed X, deleted, typed Y instead)
+        - Session energy curve (accelerating, steady, decelerating)
         """
-        features = torch.zeros(64)
-        text = _extract_text(state)
-        if text:
-            # Cognitive state signals
-            signals = {
-                0: "frustrat", 1: "decisive", 2: "uncertain",
-                3: "explor", 4: "fatigue", 5: "confident",
-                6: "focus", 7: "anxious", 8: "rapid",
-                9: "hesitat", 10: "rethink", 11: "delet",
-            }
-            low = text.lower()
-            for idx, keyword in signals.items():
-                features[idx] = 1.0 if keyword in low else 0.0
-            # Energy as text density
-            features[12] = min(len(text) / 500.0, 1.0)
-            # Character-level hash for richer signal
-            for i, c in enumerate(text[:48]):
-                features[14 + (i % 48)] += ord(c) / 128.0
+        features = torch.zeros(self.N_FEATURES)
 
-        ptext = _extract_text(patterns)
-        if ptext:
-            features[62] = min(len(ptext) / 500.0, 1.0)
-            features[63] = ptext.lower().count("pattern") / 10.0
+        # Parse twin_state — contains temporal metrics from the watcher
+        state_data = _parse_saturn_data(_extract_text(state))
+        if state_data:
+            # ── Keystroke dynamics [0-15] ──
+            metrics = state_data.get("metrics", state_data.get("temporal", {}))
+            features[0] = _clamp(metrics.get("keystroke_velocity", 0) / 10.0)
+            features[1] = _clamp(metrics.get("mean_iki", 0) / 500.0)       # inter-key interval ms
+            features[2] = _clamp(metrics.get("iki_variance", 0) / 1000.0)  # variance = erratic typing
+            features[3] = _clamp(metrics.get("iki_std", 0) / 200.0)
+            features[4] = _clamp(metrics.get("typing_acceleration", 0.5))   # >0.5 speeding up
+            features[5] = _clamp(metrics.get("chars_per_second", 0) / 15.0)
+            features[6] = _clamp(metrics.get("words_per_minute", 0) / 120.0)
+            features[7] = _clamp(metrics.get("peak_velocity", 0) / 20.0)
+            # Velocity distribution shape
+            vel_hist = metrics.get("velocity_histogram", [])
+            for i, v in enumerate(vel_hist[:8]):
+                features[8 + i] = _clamp(float(v))
+
+            # ── Deletion patterns [16-31] ──
+            deletions = state_data.get("deletions", metrics)
+            features[16] = _clamp(deletions.get("delete_rate", 0))          # deletes per keystroke
+            features[17] = _clamp(deletions.get("delete_burst_count", 0) / 10.0)
+            features[18] = _clamp(deletions.get("mean_burst_length", 0) / 20.0)
+            features[19] = _clamp(deletions.get("max_burst_length", 0) / 50.0)
+            features[20] = _clamp(deletions.get("delete_to_type_ratio", 0))
+            features[21] = _clamp(deletions.get("burst_frequency", 0))      # bursts per minute
+            features[22] = _clamp(deletions.get("chars_deleted", 0) / 500.0)
+            features[23] = _clamp(deletions.get("words_deleted", 0) / 50.0)
+            # Deletion position in sentence (early = rethinking, late = editing)
+            del_positions = deletions.get("burst_positions", [])
+            for i, p in enumerate(del_positions[:8]):
+                features[24 + i] = _clamp(float(p))
+
+            # ── Hesitation patterns [32-47] ──
+            hesitations = state_data.get("hesitations", metrics)
+            features[32] = _clamp(hesitations.get("pause_count", 0) / 20.0)
+            features[33] = _clamp(hesitations.get("mean_pause_ms", 0) / 5000.0)
+            features[34] = _clamp(hesitations.get("max_pause_ms", 0) / 30000.0)
+            features[35] = _clamp(hesitations.get("pause_ratio", 0))        # time paused / total time
+            features[36] = _clamp(hesitations.get("pause_frequency", 0))    # pauses per minute
+            features[37] = _clamp(hesitations.get("mid_word_pauses", 0) / 10.0)  # worst kind
+            features[38] = _clamp(hesitations.get("pre_delete_pauses", 0) / 10.0)  # think then delete
+            features[39] = _clamp(hesitations.get("increasing_pauses", 0))  # fatigue signal
+            # Pause duration distribution
+            pause_hist = hesitations.get("pause_histogram", [])
+            for i, p in enumerate(pause_hist[:8]):
+                features[40 + i] = _clamp(float(p))
+
+            # ── Rethinking patterns [48-63] ──
+            rethinking = state_data.get("rethinking", metrics)
+            features[48] = _clamp(rethinking.get("rethink_count", 0) / 10.0)
+            features[49] = _clamp(rethinking.get("edit_distance_mean", 0) / 50.0)
+            features[50] = _clamp(rethinking.get("rewrite_rate", 0))         # rewrites per sentence
+            features[51] = _clamp(rethinking.get("draft_count", 0) / 5.0)
+            features[52] = _clamp(rethinking.get("semantic_shift", 0))       # meaning change 0-1
+            features[53] = _clamp(rethinking.get("false_starts", 0) / 10.0)
+            features[54] = _clamp(rethinking.get("completion_ratio", 0))     # started vs finished
+            features[55] = _clamp(rethinking.get("direction_changes", 0) / 5.0)
+            # Per-rethink edit distances
+            edits = rethinking.get("edit_distances", [])
+            for i, e in enumerate(edits[:8]):
+                features[56 + i] = _clamp(float(e) / 50.0)
+
+            # ── Session dynamics [64-79] ──
+            session = state_data.get("session", state_data)
+            features[64] = _clamp(session.get("time_on_task_min", 0) / 60.0)
+            features[65] = _clamp(session.get("energy", session.get("energy_level", 0.5)))
+            features[66] = _clamp(session.get("momentum", 0.5))             # rolling velocity trend
+            features[67] = _clamp(session.get("fatigue_score", 0))
+            features[68] = _clamp(session.get("focus_score", 0.5))
+            features[69] = _clamp(session.get("flow_state", 0))             # 0=scattered, 1=deep flow
+            features[70] = _clamp(session.get("context_switches", 0) / 10.0)
+            features[71] = _clamp(session.get("prompt_count", 0) / 50.0)
+            # Energy curve (recent windows)
+            energy_curve = session.get("energy_curve", [])
+            for i, e in enumerate(energy_curve[:8]):
+                features[72 + i] = _clamp(float(e))
+
+            # ── Twin predictions [80-95] ──
+            predictions = state_data.get("predictions", state_data)
+            features[80] = _clamp(predictions.get("confidence", 0.5))
+            features[81] = _clamp(predictions.get("frustration", 0))
+            features[82] = _clamp(predictions.get("decisiveness", 0.5))
+            features[83] = _clamp(predictions.get("uncertainty", 0))
+            features[84] = _clamp(predictions.get("exploration_mode", 0))
+            features[85] = _clamp(predictions.get("urgency", 0.5))
+            features[86] = _clamp(predictions.get("satisfaction", 0.5))
+            features[87] = _clamp(predictions.get("cognitive_load", 0.5))
+
+        # Parse twin_patterns — accumulated behavioral observations
+        pattern_data = _parse_saturn_data(_extract_text(patterns))
+        if pattern_data:
+            pats = pattern_data.get("patterns", pattern_data)
+            features[88] = _clamp(pats.get("avg_velocity", 0) / 10.0)
+            features[89] = _clamp(pats.get("avg_delete_rate", 0))
+            features[90] = _clamp(pats.get("avg_hesitation_rate", 0))
+            features[91] = _clamp(pats.get("avg_rethink_rate", 0))
+            features[92] = _clamp(pats.get("pattern_stability", 0.5))  # how consistent
+            features[93] = _clamp(pats.get("session_count", 0) / 100.0)
+            features[94] = _clamp(pats.get("total_keystrokes", 0) / 100000.0)
+            features[95] = _clamp(pats.get("behavioral_drift", 0))    # changing over time
 
         return features @ self._proj  # (hidden_dim,)
 
     def gate6_bias(self, state=None, patterns=None):
         """
-        Saturn-informed GATE 6 mode selection.
+        Saturn-informed GATE 6 mode selection from TEMPORAL signals.
 
-        Returns (tamam, darash, zakat) weights:
-        - Hugo decisive + confident  -> tamam (build)
-        - Hugo uncertain + exploring -> darash (explore)
-        - Hugo fatigued + scattered  -> zakat (maintain/prune)
+        Uses the actual keystroke dynamics, not keyword matching:
+        - High velocity + low deletion + low hesitation -> tamam (EXECUTE)
+        - High hesitation + high rethinking + low velocity -> darash (EXPLORE)
+        - Increasing pauses + high fatigue + high deletion -> zakat (PRUNE)
+
+        These are continuous signals derived from millisecond-level
+        keystroke data, not binary flags from narrative text.
         """
         t, d, z = 0.34, 0.33, 0.33
-        text = _extract_text(state)
-        if text:
-            low = text.lower()
-            if "decisive" in low or "confident" in low or "rapid" in low:
-                t += 0.3; d -= 0.15; z -= 0.15
-            if "uncertain" in low or "explor" in low or "hesitat" in low:
-                d += 0.3; t -= 0.15; z -= 0.15
-            if "fatigue" in low or "tired" in low or "scatter" in low:
-                z += 0.3; t -= 0.15; d -= 0.15
+
+        state_data = _parse_saturn_data(_extract_text(state))
+        if state_data:
+            metrics = state_data.get("metrics", state_data.get("temporal", {}))
+            predictions = state_data.get("predictions", state_data)
+            deletions = state_data.get("deletions", metrics)
+            hesitations = state_data.get("hesitations", metrics)
+            rethinking = state_data.get("rethinking", metrics)
+            session = state_data.get("session", state_data)
+
+            # Velocity signal: fast typing = decisive = build
+            velocity = metrics.get("chars_per_second", 0) / 10.0
+            # Deletion signal: heavy deleting = uncertain or pruning
+            delete_rate = deletions.get("delete_rate", 0)
+            # Hesitation signal: long pauses = thinking/uncertain
+            pause_ratio = hesitations.get("pause_ratio", 0)
+            # Rethinking signal: rewrites = exploring alternatives
+            rethink_rate = rethinking.get("rethink_count", 0) / 10.0
+            # Fatigue signal: increasing pauses over session
+            fatigue = session.get("fatigue_score", 0)
+            # Direct predictions from Saturn's 7-gate processing
+            decisiveness = predictions.get("decisiveness", 0.5)
+            frustration = predictions.get("frustration", 0)
+            energy = session.get("energy", predictions.get("energy_level", 0.5))
+
+            # TAMAM (build): fast, decisive, low deletion, low hesitation
+            tamam_signal = (
+                velocity * 0.3 +
+                decisiveness * 0.3 +
+                (1.0 - delete_rate) * 0.2 +
+                (1.0 - pause_ratio) * 0.2
+            )
+
+            # DARASH (explore): hesitant, rethinking, uncertain
+            darash_signal = (
+                pause_ratio * 0.25 +
+                rethink_rate * 0.25 +
+                (1.0 - decisiveness) * 0.25 +
+                (1.0 - velocity) * 0.25
+            )
+
+            # ZAKAT (maintain): fatigued, heavy deletion, frustrated
+            zakat_signal = (
+                fatigue * 0.3 +
+                delete_rate * 0.25 +
+                frustration * 0.25 +
+                (1.0 - energy) * 0.2
+            )
+
+            # Blend with base (signals have 0.6 total influence)
+            t += tamam_signal * 0.6
+            d += darash_signal * 0.6
+            z += zakat_signal * 0.6
+
         total = t + d + z
         return t / total, d / total, z / total
 
@@ -545,6 +696,66 @@ def _extract_text(mcp_result):
         if "text" in mcp_result:
             return mcp_result["text"]
     return str(mcp_result)
+
+
+def _parse_saturn_data(text):
+    """
+    Parse Saturn's temporal perception data.
+
+    Saturn's twin_state returns structured data with keystroke metrics:
+    {
+        "metrics": {"keystroke_velocity": 5.2, "mean_iki": 180, ...},
+        "deletions": {"delete_rate": 0.12, "burst_count": 3, ...},
+        "hesitations": {"pause_count": 7, "mean_pause_ms": 2300, ...},
+        "rethinking": {"rethink_count": 2, "edit_distance_mean": 15, ...},
+        "session": {"energy": 0.7, "fatigue_score": 0.2, ...},
+        "predictions": {"decisiveness": 0.8, "frustration": 0.1, ...},
+        "narrative": "Hugo is typing rapidly with high confidence..."
+    }
+
+    If it's not JSON (older Saturn versions), we still extract what we can.
+    """
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Fallback: extract numeric patterns from narrative text
+    # Saturn's narrative includes embedded metrics like "velocity: 5.2 cps"
+    result = {}
+    import re
+    # Match "key: number" patterns in narrative text
+    for match in re.finditer(r'(\w+)[:\s]+(\d+\.?\d*)\s*(ms|cps|wpm|%)?', text):
+        key, value, unit = match.group(1).lower(), float(match.group(2)), match.group(3)
+        if key not in result:
+            result.setdefault("metrics", {})[key] = value
+    # Extract known Saturn narrative signals as prediction scores
+    low = text.lower()
+    preds = {}
+    if "frustrat" in low:
+        preds["frustration"] = 0.8
+    if "decisive" in low or "rapid" in low:
+        preds["decisiveness"] = 0.8
+    if "uncertain" in low or "hesitat" in low:
+        preds["uncertainty"] = 0.7
+        preds["decisiveness"] = 0.3
+    if "fatigue" in low or "tired" in low:
+        preds.setdefault("session", {})
+        result.setdefault("session", {})["fatigue_score"] = 0.7
+    if "explor" in low:
+        preds["exploration_mode"] = 0.8
+    if preds:
+        result["predictions"] = preds
+    return result if result else None
+
+
+def _clamp(v, lo=0.0, hi=1.0):
+    """Clamp value to [0, 1] range."""
+    return max(lo, min(hi, float(v))) if v is not None else 0.0
 
 
 def _parse_nodes(text):
