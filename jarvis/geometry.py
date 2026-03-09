@@ -227,14 +227,19 @@ def coherence_score(x: list[float]) -> float:
     return max(0.0, min(1.0, cos_sim))
 
 
-def face_activations(x: list[float]) -> list[float]:
+def face_activations(x: list[float], temperature: float = PHI) -> list[float]:
     """
     Activation strength of each face for state x.
-    = phi-temperature softmax of similarities to each vertex.
+    = softmax of similarities to each vertex at given temperature.
+
+    Temperature guide:
+        PHI (1.618)  — smooth blending for manifold projection
+        1.0          — sharper discrimination for routing decisions
+        0.5          — very sharp, only dominant faces matter (adjacency checks)
     """
     x_norm = normalize(x)
     sims = [dot(x_norm, v) for v in VERTICES_7D]
-    return softmax(sims, temperature=PHI)
+    return softmax(sims, temperature=temperature)
 
 
 def adjacency_penalty(face_weights: list[float]) -> float:
