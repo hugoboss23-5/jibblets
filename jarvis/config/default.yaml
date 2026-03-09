@@ -1,0 +1,39 @@
+# JARVIS Default Configuration
+
+router:
+  input_dim: 384
+  hidden_dim: 256
+  num_routes: 5
+  num_fast_layers: 2
+  num_heads: 4
+  hyper_hidden: 128
+  num_hyper_layers: 3
+  fast_weight_decay: 0.95
+  fast_weight_lr: 0.5
+  internal_lr: 0.001
+  coherence_weight: 1.0
+  adjacency_weight: 0.5
+  routing_weight: 1.0
+  quality_weight: 1.0
+  checkpoint_every: 50
+  max_delta_per_step: 1.0
+  dropout: 0.1
+
+organs:
+  claude:
+    default_model: "claude-sonnet-4-20250514"
+    opus_model: "claude-opus-4-20250514"
+    max_tokens: 4096
+
+spine:
+  watty_url: null  # Set via CLI arg or MCP config
+  memory_cache_size: 100
+  metabolize_quality_threshold: 0.3
+
+interface:
+  verbose: false
+  checkpoint_dir: "./jarvis_state"
+
+server:
+  host: "127.0.0.1"
+  port: 8420

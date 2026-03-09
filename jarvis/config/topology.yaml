@@ -1,0 +1,65 @@
+# Chestahedron Topology Configuration
+# 7-face geometric topology for cognitive routing
+
+geometry:
+  num_faces: 7
+  phi: 1.618033988749895      # Golden ratio
+  phi_angle_deg: 36           # Phi angle
+
+  # Face types
+  triangular_faces: [0, 1, 2, 3]   # Equilateral triangles
+  kite_faces: [4, 5, 6]            # Kite quadrilaterals
+
+  # Face-to-operation mapping
+  faces:
+    0:
+      name: "DIAGNOSE"
+      type: "triangle"
+      description: "Read the situation — analyze input, identify patterns"
+    1:
+      name: "LOAD"
+      type: "triangle"
+      description: "Pull relevant context — memory retrieval, context integration"
+    2:
+      name: "CONSTRAIN"
+      type: "triangle"
+      description: "Set boundaries — scope limitation, guard rails"
+    3:
+      name: "GENERATE"
+      type: "triangle"
+      description: "Produce candidates — creative generation, option exploration"
+    4:
+      name: "BREAK"
+      type: "kite"
+      description: "Stress-test — find failure modes, adversarial analysis"
+    5:
+      name: "CUT"
+      type: "kite"
+      description: "Select and compress — decision making, response shaping"
+    6:
+      name: "ROUTE"
+      type: "kite"
+      description: "Dispatch to organs — execution, API selection"
+
+  # Adjacency edges (face pairs sharing an edge)
+  edges:
+    - [0, 1]   # DIAGNOSE <-> LOAD
+    - [0, 2]   # DIAGNOSE <-> CONSTRAIN
+    - [0, 3]   # DIAGNOSE <-> GENERATE
+    - [1, 4]   # LOAD <-> BREAK
+    - [1, 5]   # LOAD <-> CUT
+    - [2, 5]   # CONSTRAIN <-> CUT
+    - [2, 6]   # CONSTRAIN <-> ROUTE
+    - [3, 4]   # GENERATE <-> BREAK
+    - [3, 6]   # GENERATE <-> ROUTE
+    - [4, 5]   # BREAK <-> CUT
+    - [4, 6]   # BREAK <-> ROUTE
+    - [5, 6]   # CUT <-> ROUTE
+
+# Coherence metric parameters
+coherence:
+  # Temperature for softmax vertex assignment (scaled by phi)
+  temperature_scale: 1.618033988749895
+  # Loss weights
+  manifold_weight: 1.0
+  adjacency_weight: 0.5
