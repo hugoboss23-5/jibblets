@@ -1,0 +1,171 @@
+# Tool registry for Claude's environment
+# face_affinity: which Chestahedron faces each tool aligns with (0.0-1.0)
+# Tags help with routing decisions
+
+tools:
+  web_search:
+    description: "Search the web for current information"
+    latency: low
+    cost: none
+    face_affinity:
+      LOAD: 0.8
+      DIAGNOSE: 0.6
+      BREAK: 0.3
+    tags: [current_events, verification, research, facts]
+
+  web_fetch:
+    description: "Fetch full content from a URL"
+    latency: medium
+    cost: none
+    face_affinity:
+      LOAD: 0.9
+      DIAGNOSE: 0.4
+    tags: [deep_reading, documentation, articles]
+
+  bash_tool:
+    description: "Execute bash commands, run code, process data"
+    latency: low
+    cost: none
+    face_affinity:
+      GENERATE: 0.8
+      BREAK: 0.7
+      CUT: 0.4
+    tags: [computation, code_execution, data_processing, file_ops]
+
+  create_file:
+    description: "Create files (code, documents, artifacts)"
+    latency: low
+    cost: none
+    face_affinity:
+      GENERATE: 0.9
+      CUT: 0.6
+      ROUTE: 0.4
+    tags: [documents, code, artifacts, deliverables]
+
+  view:
+    description: "Read files, directories, images"
+    latency: low
+    cost: none
+    face_affinity:
+      LOAD: 0.9
+      DIAGNOSE: 0.5
+    tags: [file_reading, inspection, context]
+
+  kd_vault_query:
+    description: "Search persistent knowledge graph (facts and beliefs)"
+    latency: medium
+    cost: none
+    face_affinity:
+      LOAD: 0.9
+      DIAGNOSE: 0.7
+      CONSTRAIN: 0.3
+    tags: [memory, beliefs, cross_domain, persistence]
+
+  kd_metabolize:
+    description: "Deposit knowledge into persistent graph"
+    latency: medium
+    cost: none
+    face_affinity:
+      CUT: 0.7
+      ROUTE: 0.6
+    tags: [learning, knowledge_deposit, persistence]
+
+  kd_graph_query:
+    description: "Spreading activation search over knowledge graph"
+    latency: medium
+    cost: none
+    face_affinity:
+      DIAGNOSE: 0.8
+      LOAD: 0.7
+      GENERATE: 0.5
+    tags: [connections, topology, discovery]
+
+  kd_graph_build:
+    description: "Build edges between knowledge nodes"
+    latency: medium
+    cost: none
+    face_affinity:
+      GENERATE: 0.6
+      ROUTE: 0.5
+    tags: [topology, connections, structure]
+
+  conversation_search:
+    description: "Search past conversations with this user"
+    latency: low
+    cost: none
+    face_affinity:
+      LOAD: 0.9
+      DIAGNOSE: 0.4
+    tags: [history, continuity, shared_context]
+
+  recent_chats:
+    description: "Retrieve recent conversations by time"
+    latency: low
+    cost: none
+    face_affinity:
+      LOAD: 0.8
+    tags: [history, recent, time_based]
+
+  google_drive_search:
+    description: "Search user's Google Drive files"
+    latency: medium
+    cost: none
+    face_affinity:
+      LOAD: 0.8
+      DIAGNOSE: 0.3
+    tags: [documents, internal, work_context]
+
+  google_drive_fetch:
+    description: "Fetch specific Google Doc contents"
+    latency: medium
+    cost: none
+    face_affinity:
+      LOAD: 0.9
+    tags: [documents, reading, internal]
+
+  anthropic_api:
+    description: "Call Claude API for sub-agent reasoning in artifacts"
+    latency: high
+    cost: api_tokens
+    face_affinity:
+      GENERATE: 0.8
+      BREAK: 0.6
+      DIAGNOSE: 0.5
+    tags: [sub_agents, parallel_analysis, complex_reasoning]
+
+  image_search:
+    description: "Search for images on the web"
+    latency: low
+    cost: none
+    face_affinity:
+      LOAD: 0.6
+      GENERATE: 0.5
+    tags: [visual, references, examples]
+
+  places_search:
+    description: "Search for places, businesses, restaurants"
+    latency: low
+    cost: none
+    face_affinity:
+      LOAD: 0.7
+      GENERATE: 0.4
+    tags: [locations, businesses, travel]
+
+  message_compose:
+    description: "Draft emails, Slack messages, texts"
+    latency: low
+    cost: none
+    face_affinity:
+      GENERATE: 0.8
+      CUT: 0.6
+      CONSTRAIN: 0.5
+    tags: [communication, drafting, messages]
+
+  tool_search:
+    description: "Find and load deferred tools (calendar, reminders, etc)"
+    latency: low
+    cost: none
+    face_affinity:
+      ROUTE: 0.9
+      LOAD: 0.4
+    tags: [tool_discovery, deferred_tools]
